@@ -1,33 +1,40 @@
-# Use an official lightweight Python 3.11 image built on Debian Bookworm
-FROM python:3.11-slim-bookworm 
+# 1. Upgrade to a modern, supported OS base layer (Debian Bookworm)
+FROM python:3.10-slim-bookworm
 
-# Set the working directory inside the container to /app
-WORKDIR /app
+# Set the working directory inside the container
+WORKDIR /app/backend
 
-# Install essential system tools required for compiling packages and downloading files
-RUN apt-get update && apt-get install -y build-essential curl && rm -rf /var/lib/apt/lists/*
+# 2. Update system packages, patch vulnerabilities, and clean up apt cache
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends gcc libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# Copy our Python requirements list into the container
+# 3. Create a dedicated non-root application execution user
+RUN groupadd -r fastapiuser && useradd -r -g fastapiuser fastapiuser
+
+# Copy requirements manifest first to optimize Docker layer caching
 COPY backend/requirements.txt .
 
-# Install all required Python packages (including FastAPI, Pydantic, and Prisma)
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies and Prisma securely without cache
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir prisma
 
-# --- FIX FOR PRISMA-CLIENT-PYTHON ---
-# Manually create the missing executable script so Prisma CLI can find it in the system PATH
-RUN echo '#!/usr/local/bin/python' > /usr/local/bin/prisma-client-python && \
-    echo 'from prisma.cli import main' >> /usr/local/bin/prisma-client-python && \
-    echo "if __name__ == '__main__': main()" >> /usr/local/bin/prisma-client-python && \
-    chmod +x /usr/local/bin/prisma-client-python
+# Copy the backend source code and root Prisma schema
+COPY backend/ ./
+COPY prisma/ ./prisma/
 
-# Copy the database schema folder from the root workspace into the container
-COPY prisma/ ./prisma
+# Generate the Prisma client using Python module syntax
+RUN python -m prisma generate --schema=prisma/schema.prisma
 
-# Copy the remaining backend application source code into /app
-COPY backend/ .
+# 4. Assign file execution ownership to our unprivileged user
+RUN chown -R fastapiuser:fastapiuser /app
 
-# Run Prisma generate to build the type-safe Python client database bindings
-RUN prisma generate
+# 5. Drop root execution privileges
+USER fastapiuser
 
-# Expose port 8000 so our FastAPI backend can receive web traffic
+# Expose the FastAPI port
 EXPOSE 8000
+
+# Command to run the application
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

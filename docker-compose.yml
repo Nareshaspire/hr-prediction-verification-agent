@@ -1,41 +1,57 @@
-version: '3.8'
-
 services:
   db:
     image: postgres:15-alpine
+    container_name: hrpredictionagent-db-1
     environment:
-      POSTGRES_USER: hr_admin
-      POSTGRES_PASSWORD: securepassword
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
       POSTGRES_DB: hr_verification
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - hr_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hr_verification"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   backend:
-    build: 
-      context: .                  # <--- Context is now the root HRPredictionAgent directory
-      dockerfile: backend/Dockerfile # <--- Path to the Dockerfile from root
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: hrpredictionagent-backend-1
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      - DATABASE_URL=postgresql://hr_admin:securepassword@db:5432/hr_verification
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-""}
+      - DATABASE_URL=postgresql://postgres:password@db:5432/hr_verification
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - OLLAMA_MODEL=llama3
     depends_on:
-      - db
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+      db:
+        condition: service_healthy
+    networks:
+      - hr_network
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    build: ./frontend
+    container_name: hrpredictionagent-frontend-1
     ports:
       - "8501:8501"
     environment:
       - BACKEND_URL=http://backend:8000
     depends_on:
       - backend
-    command: streamlit run app.py --server.port=8501 --server.address=0.0.0.0
+    networks:
+      - hr_network
 
 volumes:
   postgres_data:
+
+networks:
+  hr_network:
+    driver: bridge

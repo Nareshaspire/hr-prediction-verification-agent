@@ -4,7 +4,7 @@ datasource db {
 }
 
 generator client {
-  provider             = "prisma-client-python"
+  provider             = "prisma-client-py"
   interface            = "asyncio"
   recursive_type_depth = 5
 }
@@ -18,21 +18,21 @@ model Applicant {
 }
 
 model ParsedCredential {
-  id                String    @id @default(uuid())
-  applicant_id      String
-  applicant         Applicant @relation(fields: [applicant_id], references: [id], onDelete: Cascade)
-  credential_type   String
-  extracted_text    String
-  confidence_score  Float
-  authenticity_tier String
-  created_at        DateTime  @default(now())
-}
-
-model HITLFeedback {
   id               String    @id @default(uuid())
   applicant_id     String
   applicant        Applicant @relation(fields: [applicant_id], references: [id], onDelete: Cascade)
-  action           String    
-  recruiter_notes  String?
-  timestamp        DateTime  @default(now())
+  credential_type  String
+  extracted_text   String
+  confidence_score Float
+  authenticity_tier String
+  created_at       DateTime  @default(now())
+}
+
+model HITLFeedback {
+  id              String    @id @default(uuid())
+  applicant_id    String
+  applicant       Applicant @relation(fields: [applicant_id], references: [id], onDelete: Cascade)
+  action          String    
+  recruiter_notes String?
+  timestamp       DateTime  @default(now())
 }
