@@ -28,9 +28,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      - DATABASE_URL=postgresql://postgres:password@db:5432/hr_verification
+      - DATABASE_URL=postgresql://postgres:password@db:5432/hr_verification?schema=public
       - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
-      - OLLAMA_MODEL=llama3
+      - OLLAMA_MODEL=granite3.3:2b
+      - PRISMA_CACHE_DIR=/tmp/prisma
     depends_on:
       db:
         condition: service_healthy
@@ -38,7 +39,9 @@ services:
       - hr_network
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: hrpredictionagent-frontend-1
     ports:
       - "8501:8501"

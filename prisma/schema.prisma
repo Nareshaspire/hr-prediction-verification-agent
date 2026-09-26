@@ -9,30 +9,66 @@ generator client {
   recursive_type_depth = 5
 }
 
+model Job {
+  id                    String      @id @default(uuid())
+  title                 String
+  department            String?
+  location              String?
+  description           String
+  must_have_skills      String[]
+  preferred_skills      String[]
+  status                String      @default("Open")
+  created_at            DateTime    @default(now())
+  updated_at            DateTime    @updatedAt
+  applicants            Applicant[]
+}
+
 model Applicant {
-  id             String             @id @default(uuid())
-  original_text  String
-  created_at     DateTime           @default(now())
-  credentials    ParsedCredential[]
-  feedback_logs  HITLFeedback[]
+  id                   String             @id @default(uuid())
+  job_id               String?
+  job                  Job?               @relation(fields: [job_id], references: [id], onDelete: SetNull)
+  display_name         String?
+  original_text        String
+  stage                String             @default("New")
+  consent_acknowledged Boolean            @default(false)
+  retention_until      DateTime?
+  analysis_json        Json?
+  model_name           String?
+  prompt_version       String?
+  created_at           DateTime           @default(now())
+  credentials          ParsedCredential[]
+  feedback_logs        HITLFeedback[]
+  audit_events         AuditEvent[]
 }
 
 model ParsedCredential {
-  id               String    @id @default(uuid())
-  applicant_id     String
-  applicant        Applicant @relation(fields: [applicant_id], references: [id], onDelete: Cascade)
-  credential_type  String
-  extracted_text   String
-  confidence_score Float
+  id                String    @id @default(uuid())
+  applicant_id      String
+  applicant         Applicant @relation(fields: [applicant_id], references: [id], onDelete: Cascade)
+  credential_type   String
+  extracted_text    String
+  confidence_score  Float
   authenticity_tier String
-  created_at       DateTime  @default(now())
+  created_at        DateTime  @default(now())
 }
 
 model HITLFeedback {
   id              String    @id @default(uuid())
   applicant_id    String
   applicant       Applicant @relation(fields: [applicant_id], references: [id], onDelete: Cascade)
-  action          String    
+  action          String
+  recruiter       String    @default("Recruiter")
   recruiter_notes String?
+  scorecard       Json?
   timestamp       DateTime  @default(now())
+}
+
+model AuditEvent {
+  id           String    @id @default(uuid())
+  applicant_id String
+  applicant    Applicant @relation(fields: [applicant_id], references: [id], onDelete: Cascade)
+  action       String
+  actor        String    @default("System")
+  metadata     Json?
+  timestamp    DateTime  @default(now())
 }
