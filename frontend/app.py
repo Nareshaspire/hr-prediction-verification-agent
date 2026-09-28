@@ -1,5 +1,4 @@
 import os
-
 import pandas as pd
 import requests
 import streamlit as st
@@ -10,11 +9,30 @@ STAGES = ["New", "Reviewed", "Interview", "Decision", "Archived"]
 
 st.set_page_config(page_title="Recruiter Workflow Copilot", page_icon="🧭", layout="wide")
 
+NANU_ROLES = {
+    "Ask": {
+        "description": "Ask questions and get explanations.",
+        "role_definition": "You are Nanu, a knowledgeable technical assistant focused on answering questions and providing information about software development, technology, and related topics."
+    },
+    "Plan": {
+        "description": "Plans tasks: analyzes requirements, researches and designs implementation steps.",
+        "role_definition": "You are Nanu, an experienced technical leader who is inquisitive and an excellent planner."
+    },
+    "Agent": {
+        "description": "Take your idea, or plan, and bring it to life.",
+        "role_definition": "You are Nanu, a highly skilled software engineer with extensive knowledge in many programming languages, frameworks, design patterns, and best practices."
+    }
+}
+
 
 def api(method: str, path: str, **kwargs):
     response = requests.request(method, f"{BACKEND_URL}{path}", timeout=REQUEST_TIMEOUT, **kwargs)
     if not response.ok:
-        detail = response.json().get("detail", response.text) if response.content else "Unknown error"
+        try:
+            data = response.json()
+            detail = data.get("detail", str(data))
+        except Exception:
+            detail = response.text or "Unknown server error"
         raise RuntimeError(f"{response.status_code}: {detail}")
     return response
 
@@ -31,6 +49,16 @@ st.title("🧭 Recruiter Workflow Copilot")
 st.caption("AI prepares evidence and interview questions. Recruiters review, decide, and retain the audit trail.")
 
 with st.sidebar:
+    st.header("🤖 Nanu Assistant Mode")
+    selected_role = st.selectbox(
+        "Select Operating Persona",
+        options=list(NANU_ROLES.keys()),
+        format_func=lambda x: f"{x} — {NANU_ROLES[x]['description']}"
+    )
+    st.session_state["active_nanu_role"] = selected_role
+    st.caption(f"**Persona Context:** {NANU_ROLES[selected_role]['role_definition']}")
+    
+    st.markdown("---")
     st.header("New requisition")
     with st.form("new-job", clear_on_submit=True):
         title = st.text_input("Role title")
@@ -50,6 +78,7 @@ with st.sidebar:
                 "must_have_skills": must_have.split(","),
                 "preferred_skills": preferred.split(","),
             }).json()
+            st.session_state["selected_job_id"] = created["id"]
             st.success(f"Created {created['title']}")
             st.rerun()
         except Exception as error:
@@ -61,7 +90,17 @@ if not jobs:
     st.stop()
 
 job_labels = {f"{job['title']} · {job['applicant_count']} candidates": job["id"] for job in jobs}
-selected_label = st.selectbox("Active requisition", list(job_labels))
+label_list = list(job_labels.keys())
+
+# Auto-select the newly created job if present in session state
+default_idx = 0
+if "selected_job_id" in st.session_state:
+    for idx, (lbl, j_id) in enumerate(job_labels.items()):
+        if j_id == st.session_state["selected_job_id"]:
+            default_idx = idx
+            break
+
+selected_label = st.selectbox("Active requisition", label_list, index=default_idx)
 job_id = job_labels[selected_label]
 job = api("GET", f"/api/v1/jobs/{job_id}").json()
 
@@ -88,7 +127,7 @@ with tab_candidates:
 
 with tab_analyze:
     st.markdown("#### Create an interview-preparation brief")
-    st.warning("Use this as recruiter support only. Do not use the generated text or score as an automated hiring decision.")
+    st.warning(f"Active AI Persona: **{selected_role} Mode** — Use this as recruiter support only. Do not use the generated text or score as an automated hiring decision.")
     with st.form("analyze-candidate", clear_on_submit=True):
         candidate_name = st.text_input("Candidate name or internal reference")
         consent = st.checkbox("I confirm the candidate has received the required notice and this analysis is for recruiter review.")
@@ -96,8 +135,13 @@ with tab_analyze:
         analyze = st.form_submit_button("Generate preparation brief", type="primary")
     if analyze:
         try:
-            with st.spinner("Preparing evidence and interview questions with the local model..."):
-                result = api("POST", f"/api/v1/jobs/{job_id}/candidates", json={"display_name": candidate_name, "resume_text": resume, "consent_acknowledged": consent}).json()
+            with st.spinner(f"Preparing evidence and interview questions using {selected_role} mode..."):
+                result = api("POST", f"/api/v1/jobs/{job_id}/candidates", json={
+                    "display_name": candidate_name, 
+                    "resume_text": resume, 
+                    "consent_acknowledged": consent,
+                    "nanu_role": selected_role
+                }).json()
             st.success("Candidate logged and preparation brief created.")
             st.metric("Preparation confidence", f"{result['preparation_confidence']}%")
             st.dataframe(pd.DataFrame(result["coverage"]), hide_index=True, use_container_width=True)

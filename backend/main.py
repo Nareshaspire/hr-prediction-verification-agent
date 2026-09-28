@@ -9,14 +9,37 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Response, status
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
-from prisma import Prisma
+from prisma import Json, Prisma
 from pydantic import BaseModel, Field, field_validator
 
 MAX_RESUME_CHARS = 3_500
 MAX_COMPLETION_TOKENS = 180
 LLM_TIMEOUT_SECONDS = 150.0
-PROMPT_VERSION = "recruiter-workflow-v1"
+PROMPT_VERSION = "recruiter-workflow-v2"
 PIPELINE_STAGES = {"New", "Reviewed", "Interview", "Decision", "Archived"}
+
+NANU_MODE_PROMPTS = {
+    "Ask": (
+        "You are Nanu, a knowledgeable technical assistant focused on answering questions and "
+        "providing information about software development, technology, and related topics. "
+        "Produce a concise interview-preparation brief. Analyze the candidate's technical skills, "
+        "explain requirement alignments, and provide exactly three targeted interview questions. "
+        "Do not make automated hiring or rejection recommendations."
+    ),
+    "Plan": (
+        "You are Nanu, an experienced technical leader who is inquisitive and an excellent planner. "
+        "Produce a structured interview-preparation brief and assessment plan. Analyze requirement "
+        "coverage, identify ambiguities to validate during screening, and outline exactly three "
+        "probing technical evaluation questions. Do not make automated hiring or rejection recommendations."
+    ),
+    "Agent": (
+        "You are Nanu, a highly skilled software engineer with extensive knowledge in many "
+        "programming languages, frameworks, design patterns, and best practices. "
+        "Produce a technical interview-preparation brief focused on practical execution depth, "
+        "architectural patterns, and hands-on competencies. Provide exactly three technical validation "
+        "questions. Do not make automated hiring or rejection recommendations."
+    ),
+}
 
 db = Prisma()
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
@@ -30,7 +53,7 @@ client = AsyncOpenAI(
 )
 inference_lock = asyncio.Lock()
 
-app = FastAPI(title="Recruiter Workflow Copilot", version="2.0.0")
+app = FastAPI(title="Recruiter Workflow Copilot", version="2.1.0")
 
 
 class JobRequest(BaseModel):
@@ -51,6 +74,7 @@ class CandidateRequest(BaseModel):
     display_name: str = Field(..., min_length=2, max_length=120)
     resume_text: str = Field(..., min_length=20, max_length=MAX_RESUME_CHARS)
     consent_acknowledged: bool
+    nanu_role: str | None = Field(default="Ask", max_length=50)
 
     @field_validator("resume_text")
     @classmethod
@@ -108,10 +132,20 @@ def requirement_coverage(text: str, job: Any) -> list[dict[str, str]]:
     coverage: list[dict[str, str]] = []
     for skill in job.must_have_skills:
         evidence = find_evidence(text, skill)
-        coverage.append({"requirement": skill, "priority": "Must have", "status": "Evidenced" if evidence else "Unclear", "evidence": evidence or "No direct evidence found in supplied resume."})
+        coverage.append({
+            "requirement": skill,
+            "priority": "Must have",
+            "status": "Evidenced" if evidence else "Unclear",
+            "evidence": evidence or "No direct evidence found in supplied resume.",
+        })
     for skill in job.preferred_skills:
         evidence = find_evidence(text, skill)
-        coverage.append({"requirement": skill, "priority": "Preferred", "status": "Evidenced" if evidence else "Unclear", "evidence": evidence or "No direct evidence found in supplied resume."})
+        coverage.append({
+            "requirement": skill,
+            "priority": "Preferred",
+            "status": "Evidenced" if evidence else "Unclear",
+            "evidence": evidence or "No direct evidence found in supplied resume.",
+        })
     return coverage
 
 
@@ -126,7 +160,13 @@ def preparation_confidence(coverage: list[dict[str, str]], resume: str) -> float
 
 
 async def audit(applicant_id: str, action: str, actor: str = "System", metadata: dict | None = None) -> None:
-    await db.auditevent.create(data={"applicant_id": applicant_id, "action": action, "actor": actor, "metadata": metadata})
+    meta_json = Json(metadata) if metadata else None
+    await db.auditevent.create(data={
+        "applicant": {"connect": {"id": applicant_id}},
+        "action": action,
+        "actor": actor,
+        "metadata": meta_json,
+    })
 
 
 async def get_job_or_404(job_id: str) -> Any:
@@ -137,7 +177,10 @@ async def get_job_or_404(job_id: str) -> Any:
 
 
 async def get_applicant_or_404(applicant_id: str) -> Any:
-    applicant = await db.applicant.find_unique(where={"id": applicant_id}, include={"job": True, "credentials": True, "feedback_logs": True, "audit_events": True})
+    applicant = await db.applicant.find_unique(
+        where={"id": applicant_id},
+        include={"job": True, "credentials": True, "feedback_logs": True, "audit_events": True},
+    )
     if not applicant:
         raise HTTPException(status_code=404, detail="Candidate not found.")
     return applicant
@@ -158,7 +201,18 @@ async def readiness_check() -> dict:
 @app.get("/api/v1/jobs")
 async def list_jobs() -> list[dict]:
     jobs = await db.job.find_many(order={"created_at": "desc"}, include={"applicants": True})
-    return [{"id": job.id, "title": job.title, "department": job.department, "location": job.location, "status": job.status, "applicant_count": len(job.applicants), "created_at": job.created_at.isoformat()} for job in jobs]
+    return [
+        {
+            "id": job.id,
+            "title": job.title,
+            "department": job.department,
+            "location": job.location,
+            "status": job.status,
+            "applicant_count": len(job.applicants),
+            "created_at": job.created_at.isoformat(),
+        }
+        for job in jobs
+    ]
 
 
 @app.post("/api/v1/jobs", status_code=status.HTTP_201_CREATED)
@@ -170,7 +224,16 @@ async def create_job(payload: JobRequest) -> dict:
 @app.get("/api/v1/jobs/{job_id}")
 async def job_detail(job_id: str) -> dict:
     job = await get_job_or_404(job_id)
-    return {"id": job.id, "title": job.title, "department": job.department, "location": job.location, "description": job.description, "must_have_skills": job.must_have_skills, "preferred_skills": job.preferred_skills, "status": job.status}
+    return {
+        "id": job.id,
+        "title": job.title,
+        "department": job.department,
+        "location": job.location,
+        "description": job.description,
+        "must_have_skills": job.must_have_skills,
+        "preferred_skills": job.preferred_skills,
+        "status": job.status,
+    }
 
 
 @app.post("/api/v1/jobs/{job_id}/candidates", status_code=status.HTTP_201_CREATED)
@@ -181,13 +244,25 @@ async def analyze_candidate(job_id: str, payload: CandidateRequest) -> dict:
     sanitized_resume = sanitize_pii(payload.resume_text)
     coverage = requirement_coverage(sanitized_resume, job)
     confidence = preparation_confidence(coverage, sanitized_resume)
+
+    active_mode = payload.nanu_role or "Ask"
+    system_instruction = NANU_MODE_PROMPTS.get(active_mode, NANU_MODE_PROMPTS["Ask"])
+
     try:
         async with inference_lock:
             response = await client.chat.completions.create(
                 model=OLLAMA_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a recruiter copilot. Produce a concise interview-preparation brief. Do not recommend hiring or rejection. Summarize relevant experience, point out ambiguities to validate, then give exactly three interview questions."},
-                    {"role": "user", "content": f"Role: {job.title}\nMust-have skills: {', '.join(job.must_have_skills) or 'None specified'}\nResume:\n{sanitized_resume}"},
+                    {"role": "system", "content": system_instruction},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Role: {job.title}\n"
+                            f"Must-have skills: {', '.join(job.must_have_skills) or 'None specified'}\n"
+                            f"Preferred skills: {', '.join(job.preferred_skills) or 'None specified'}\n\n"
+                            f"Candidate Resume:\n{sanitized_resume}"
+                        ),
+                    },
                 ],
                 temperature=0.2,
                 max_tokens=MAX_COMPLETION_TOKENS,
@@ -195,37 +270,95 @@ async def analyze_candidate(job_id: str, payload: CandidateRequest) -> dict:
         brief = response.choices[0].message.content
         if not brief:
             raise HTTPException(status_code=502, detail="The model returned an empty response.")
+        
+        # Connect job relation and wrap JSON dictionary
         applicant = await db.applicant.create(data={
-            "job_id": job.id,
+            "job": {"connect": {"id": job.id}},
             "display_name": payload.display_name,
             "original_text": sanitized_resume,
             "consent_acknowledged": True,
             "retention_until": datetime.now(timezone.utc) + timedelta(days=90),
-            "analysis_json": {"coverage": coverage},
+            "analysis_json": Json({"coverage": coverage, "nanu_mode": active_mode}),
             "model_name": OLLAMA_MODEL,
             "prompt_version": PROMPT_VERSION,
         })
-        credential = await db.parsedcredential.create(data={"applicant_id": applicant.id, "credential_type": "Interview preparation brief", "extracted_text": brief, "confidence_score": confidence, "authenticity_tier": "Recruiter review required"})
-        await audit(applicant.id, "Candidate analyzed", metadata={"job_id": job.id, "model": OLLAMA_MODEL, "prompt_version": PROMPT_VERSION})
-        return {"id": applicant.id, "stage": applicant.stage, "preparation_confidence": credential.confidence_score, "coverage": coverage, "interview_brief": brief, "retention_until": applicant.retention_until.isoformat()}
+        credential = await db.parsedcredential.create(data={
+            "applicant": {"connect": {"id": applicant.id}},
+            "credential_type": f"{active_mode} Mode interview brief",
+            "extracted_text": brief,
+            "confidence_score": confidence,
+            "authenticity_tier": "Recruiter review required",
+        })
+        await audit(
+            applicant.id,
+            f"Candidate analyzed ({active_mode} mode)",
+            metadata={"job_id": job.id, "model": OLLAMA_MODEL, "prompt_version": PROMPT_VERSION, "mode": active_mode},
+        )
+        return {
+            "id": applicant.id,
+            "stage": applicant.stage,
+            "preparation_confidence": credential.confidence_score,
+            "coverage": coverage,
+            "interview_brief": brief,
+            "retention_until": applicant.retention_until.isoformat(),
+        }
     except APITimeoutError:
         raise HTTPException(status_code=504, detail="The local model took too long. Use a shorter resume and retry.")
     except APIConnectionError:
         raise HTTPException(status_code=503, detail="Could not connect to the local Ollama service.")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Database or inference pipeline error: {str(exc)}")
 
 
 @app.get("/api/v1/jobs/{job_id}/candidates")
 async def list_candidates(job_id: str) -> list[dict]:
     await get_job_or_404(job_id)
     applicants = await db.applicant.find_many(where={"job_id": job_id}, order={"created_at": "desc"}, include={"credentials": True})
-    return [{"id": item.id, "name": item.display_name, "stage": item.stage, "preparation_confidence": item.credentials[0].confidence_score if item.credentials else None, "created_at": item.created_at.isoformat()} for item in applicants]
+    return [
+        {
+            "id": item.id,
+            "name": item.display_name,
+            "stage": item.stage,
+            "preparation_confidence": item.credentials[0].confidence_score if item.credentials else None,
+            "created_at": item.created_at.isoformat(),
+        }
+        for item in applicants
+    ]
 
 
 @app.get("/api/v1/candidates/{applicant_id}")
 async def candidate_detail(applicant_id: str) -> dict:
     candidate = await get_applicant_or_404(applicant_id)
     brief = candidate.credentials[0] if candidate.credentials else None
-    return {"id": candidate.id, "name": candidate.display_name, "stage": candidate.stage, "job": {"id": candidate.job.id, "title": candidate.job.title} if candidate.job else None, "coverage": (candidate.analysis_json or {}).get("coverage", []), "interview_brief": brief.extracted_text if brief else None, "preparation_confidence": brief.confidence_score if brief else None, "retention_until": candidate.retention_until.isoformat() if candidate.retention_until else None, "reviews": [{"action": review.action, "recruiter": review.recruiter, "notes": review.recruiter_notes, "scorecard": review.scorecard, "timestamp": review.timestamp.isoformat()} for review in candidate.feedback_logs], "audit_events": [{"action": event.action, "actor": event.actor, "metadata": event.metadata, "timestamp": event.timestamp.isoformat()} for event in candidate.audit_events]}
+    return {
+        "id": candidate.id,
+        "name": candidate.display_name,
+        "stage": candidate.stage,
+        "job": {"id": candidate.job.id, "title": candidate.job.title} if candidate.job else None,
+        "coverage": (candidate.analysis_json or {}).get("coverage", []),
+        "interview_brief": brief.extracted_text if brief else None,
+        "preparation_confidence": brief.confidence_score if brief else None,
+        "retention_until": candidate.retention_until.isoformat() if candidate.retention_until else None,
+        "reviews": [
+            {
+                "action": review.action,
+                "recruiter": review.recruiter,
+                "notes": review.recruiter_notes,
+                "scorecard": review.scorecard,
+                "timestamp": review.timestamp.isoformat(),
+            }
+            for review in candidate.feedback_logs
+        ],
+        "audit_events": [
+            {
+                "action": event.action,
+                "actor": event.actor,
+                "metadata": event.metadata,
+                "timestamp": event.timestamp.isoformat(),
+            }
+            for event in candidate.audit_events
+        ],
+    }
 
 
 @app.patch("/api/v1/candidates/{applicant_id}/stage")
@@ -239,7 +372,13 @@ async def change_stage(applicant_id: str, payload: StageRequest) -> dict:
 @app.post("/api/v1/candidates/{applicant_id}/reviews", status_code=status.HTTP_201_CREATED)
 async def add_review(applicant_id: str, payload: ReviewRequest) -> dict:
     candidate = await get_applicant_or_404(applicant_id)
-    review = await db.hitlfeedback.create(data={"applicant_id": candidate.id, **payload.model_dump()})
+    review = await db.hitlfeedback.create(data={
+        "applicant": {"connect": {"id": candidate.id}},
+        "action": payload.action,
+        "recruiter": payload.recruiter,
+        "recruiter_notes": payload.recruiter_notes,
+        "scorecard": Json(payload.scorecard),
+    })
     await audit(candidate.id, "Recruiter review recorded", payload.recruiter, {"action": payload.action})
     return {"id": review.id, "timestamp": review.timestamp.isoformat()}
 
@@ -254,9 +393,16 @@ async def export_candidates(job_id: str) -> Response:
     for candidate in candidates:
         confidence = candidate.credentials[0].confidence_score if candidate.credentials else ""
         writer.writerow([candidate.display_name or "", candidate.stage, confidence, candidate.created_at.isoformat()])
-    return Response(content=output.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{job.title.lower().replace(" ", "-")}-candidates.csv"'})
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{job.title.lower().replace(" ", "-")}-candidates.csv"'},
+    )
 
 
 @app.get("/api/v1/integrations")
 async def integration_status() -> dict:
-    return {"ats": "Not connected", "message": "ATS connections require customer-managed OAuth credentials and are intentionally not enabled in this local deployment."}
+    return {
+        "ats": "Not connected",
+        "message": "ATS connections require customer-managed OAuth credentials and are intentionally not enabled in this local deployment.",
+    }
