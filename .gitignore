@@ -2,3 +2,13 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .env
+.env.local
+.env.*.local
+.venv/
+venv/
+ENV/
+.envrc
+*.swp
+*.swo
+.DS_Store
+postgres_data/
