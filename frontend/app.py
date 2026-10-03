@@ -26,15 +26,20 @@ NANU_ROLES = {
 
 
 def api(method: str, path: str, **kwargs):
-    response = requests.request(method, f"{BACKEND_URL}{path}", timeout=REQUEST_TIMEOUT, **kwargs)
-    if not response.ok:
-        try:
-            data = response.json()
-            detail = data.get("detail", str(data))
-        except Exception:
-            detail = response.text or "Unknown server error"
-        raise RuntimeError(f"{response.status_code}: {detail}")
-    return response
+    try:
+        response = requests.request(method, f"{BACKEND_URL}{path}", timeout=REQUEST_TIMEOUT, **kwargs)
+        if not response.ok:
+            try:
+                data = response.json()
+                detail = data.get("detail", str(data))
+            except Exception:
+                detail = response.text or "Unknown server error"
+            raise RuntimeError(f"{response.status_code}: {detail}")
+        return response
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError(f"Connection failed: cannot reach backend at {BACKEND_URL}")
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f"Request timed out after {REQUEST_TIMEOUT}s")
 
 
 def load_jobs():
@@ -45,8 +50,20 @@ def load_jobs():
         return []
 
 
+def backend_available():
+    try:
+        api("GET", "/health")
+        return True
+    except Exception:
+        return False
+
+
 st.title("🧭 Recruiter Workflow Copilot")
 st.caption("AI prepares evidence and interview questions. Recruiters review, decide, and retain the audit trail.")
+
+if not backend_available():
+    st.error(f"Backend is unavailable at {BACKEND_URL}. Start the backend service first, then refresh this page.")
+    st.stop()
 
 with st.sidebar:
     st.header("🤖 Nanu Assistant Mode")
@@ -57,7 +74,7 @@ with st.sidebar:
     )
     st.session_state["active_nanu_role"] = selected_role
     st.caption(f"**Persona Context:** {NANU_ROLES[selected_role]['role_definition']}")
-    
+
     st.markdown("---")
     st.header("New requisition")
     with st.form("new-job", clear_on_submit=True):
@@ -69,20 +86,23 @@ with st.sidebar:
         preferred = st.text_input("Preferred skills", help="Comma-separated")
         create_job = st.form_submit_button("Create requisition", type="primary")
     if create_job:
-        try:
-            created = api("POST", "/api/v1/jobs", json={
-                "title": title,
-                "department": department or None,
-                "location": location or None,
-                "description": description,
-                "must_have_skills": must_have.split(","),
-                "preferred_skills": preferred.split(","),
-            }).json()
-            st.session_state["selected_job_id"] = created["id"]
-            st.success(f"Created {created['title']}")
-            st.rerun()
-        except Exception as error:
-            st.error(f"Could not create requisition: {error}")
+        if not title or not description:
+            st.error("Role title and description are required.")
+        else:
+            try:
+                created = api("POST", "/api/v1/jobs", json={
+                    "title": title,
+                    "department": department or None,
+                    "location": location or None,
+                    "description": description,
+                    "must_have_skills": [s.strip() for s in must_have.split(",") if s.strip()] if must_have else [],
+                    "preferred_skills": [s.strip() for s in preferred.split(",") if s.strip()] if preferred else [],
+                }).json()
+                st.session_state["selected_job_id"] = created["id"]
+                st.success(f"Created {created['title']}")
+                st.rerun()
+            except Exception as error:
+                st.error(f"Could not create requisition: {error}")
 
 jobs = load_jobs()
 if not jobs:
@@ -92,7 +112,6 @@ if not jobs:
 job_labels = {f"{job['title']} · {job['applicant_count']} candidates": job["id"] for job in jobs}
 label_list = list(job_labels.keys())
 
-# Auto-select the newly created job if present in session state
 default_idx = 0
 if "selected_job_id" in st.session_state:
     for idx, (lbl, j_id) in enumerate(job_labels.items()):
@@ -121,7 +140,8 @@ tab_candidates, tab_analyze, tab_review, tab_governance = st.tabs(["Candidates",
 with tab_candidates:
     candidates = api("GET", f"/api/v1/jobs/{job_id}/candidates").json()
     if candidates:
-        st.dataframe(pd.DataFrame(candidates).rename(columns={"name": "Candidate", "stage": "Pipeline stage", "preparation_confidence": "Preparation confidence", "created_at": "Created"}), hide_index=True, use_container_width=True)
+        df = pd.DataFrame(candidates).rename(columns={"name": "Candidate", "stage": "Pipeline stage", "preparation_confidence": "Preparation confidence", "created_at": "Created"})
+        st.dataframe(df, hide_index=True, use_container_width=True)
     else:
         st.info("No candidates have been analyzed for this requisition.")
 
@@ -134,21 +154,26 @@ with tab_analyze:
         resume = st.text_area("Resume text", height=260, max_chars=3500, help="Maximum 3,500 characters for reliable local CPU inference.")
         analyze = st.form_submit_button("Generate preparation brief", type="primary")
     if analyze:
-        try:
-            with st.spinner(f"Preparing evidence and interview questions using {selected_role} mode..."):
-                result = api("POST", f"/api/v1/jobs/{job_id}/candidates", json={
-                    "display_name": candidate_name, 
-                    "resume_text": resume, 
-                    "consent_acknowledged": consent,
-                    "nanu_role": selected_role
-                }).json()
-            st.success("Candidate logged and preparation brief created.")
-            st.metric("Preparation confidence", f"{result['preparation_confidence']}%")
-            st.dataframe(pd.DataFrame(result["coverage"]), hide_index=True, use_container_width=True)
-            st.markdown(result["interview_brief"])
-            st.caption(f"Retention review date: {result['retention_until']}")
-        except Exception as error:
-            st.error(f"Analysis failed: {error}")
+        if not candidate_name or not resume:
+            st.error("Candidate name and resume are required.")
+        elif not consent:
+            st.error("You must confirm candidate consent before analysis.")
+        else:
+            try:
+                with st.spinner(f"Preparing evidence and interview questions using {selected_role} mode..."):
+                    result = api("POST", f"/api/v1/jobs/{job_id}/candidates", json={
+                        "display_name": candidate_name,
+                        "resume_text": resume,
+                        "consent_acknowledged": consent,
+                        "nanu_role": selected_role,
+                    }).json()
+                st.success("Candidate logged and preparation brief created.")
+                st.metric("Preparation confidence", f"{result['preparation_confidence']}%")
+                st.dataframe(pd.DataFrame(result["coverage"]), hide_index=True, use_container_width=True)
+                st.markdown(result["interview_brief"])
+                st.caption(f"Retention review date: {result['retention_until']}")
+            except Exception as error:
+                st.error(f"Analysis failed: {error}")
 
 with tab_review:
     candidates = api("GET", f"/api/v1/jobs/{job_id}/candidates").json()
@@ -176,13 +201,25 @@ with tab_review:
             role_fit = score_three.slider("Role fit", 1, 5, 3)
             save_review = st.form_submit_button("Save recruiter review", type="primary")
         if save_review:
-            try:
-                api("PATCH", f"/api/v1/candidates/{candidate_id}/stage", json={"stage": new_stage, "actor": recruiter})
-                api("POST", f"/api/v1/candidates/{candidate_id}/reviews", json={"action": action, "recruiter": recruiter, "recruiter_notes": notes or None, "scorecard": {"technical_evidence": technical, "communication": communication, "role_fit": role_fit}})
-                st.success("Recruiter decision and scorecard saved.")
-                st.rerun()
-            except Exception as error:
-                st.error(f"Could not save review: {error}")
+            if not recruiter:
+                st.error("Reviewer name is required.")
+            else:
+                try:
+                    api("PATCH", f"/api/v1/candidates/{candidate_id}/stage", json={"stage": new_stage, "actor": recruiter})
+                    api("POST", f"/api/v1/candidates/{candidate_id}/reviews", json={
+                        "action": action,
+                        "recruiter": recruiter,
+                        "recruiter_notes": notes or None,
+                        "scorecard": {
+                            "technical_evidence": technical,
+                            "communication": communication,
+                            "role_fit": role_fit,
+                        },
+                    })
+                    st.success("Recruiter decision and scorecard saved.")
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"Could not save review: {error}")
         if candidate["reviews"]:
             st.markdown("#### Previous reviews")
             st.dataframe(pd.DataFrame(candidate["reviews"]), hide_index=True, use_container_width=True)
