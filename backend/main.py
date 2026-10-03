@@ -246,7 +246,9 @@ async def analyze_candidate(job_id: str, payload: CandidateRequest) -> dict:
     confidence = preparation_confidence(coverage, sanitized_resume)
 
     active_mode = payload.nanu_role or "Ask"
-    system_instruction = NANU_MODE_PROMPTS.get(active_mode, NANU_MODE_PROMPTS["Ask"])
+    if active_mode not in NANU_MODE_PROMPTS:
+        raise HTTPException(status_code=422, detail=f"Nanu role must be one of: {', '.join(NANU_MODE_PROMPTS.keys())}")
+    system_instruction = NANU_MODE_PROMPTS[active_mode]
 
     try:
         async with inference_lock:
